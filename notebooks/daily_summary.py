@@ -16,8 +16,6 @@ __generated_with = "0.25.2"
 app = marimo.App(width="medium", app_title="VR foraging - daily summary")
 
 with app.setup:
-    import asyncio
-
     import boot  # progress for the static site's loading overlay; no-op elsewhere
 
     boot.report("libraries")
@@ -91,25 +89,13 @@ async def load(assets, session_picker):
     session_id = session_picker.value
     boot.report("download")
     with mo.status.spinner(title=f"Loading {session_id}"):
-        download = asyncio.ensure_future(vd.load_session(assets[session_id]))
-        await asyncio.sleep(0)  # let the requests go out before the import below blocks Python
-        import matplotlib.pyplot  # noqa: F401 - ~3 s in the browser, overlapped with the download
-        import vr_plots as vp
-
-        sites, position, licks, threshold = await download
+        sites, position, licks, threshold = await vd.load_session(assets[session_id])
     boot.report("processing")
     reward_sites = vd.prepare_reward_sites(sites)
-    colors = vp.patch_colors(reward_sites["patch_label"])
     stats = vd.session_summary(reward_sites, position)
     per_patch = vd.per_patch_table(reward_sites)
-    figures = {
-        "raster": vp.plot_outcome_raster(reward_sites),
-        "velocity": vp.plot_aligned_velocity(reward_sites, position, colors, threshold),
-        "stop_rate": vp.plot_stop_rate(reward_sites, colors),
-        "leave": vp.plot_leave_heatmap(reward_sites),
-    }
-    boot.report("done")
-    return colors, figures, licks, per_patch, position, session_id, sites, stats, vp
+    boot.report("done")  # stats and table can show now; plots follow below
+    return licks, per_patch, position, reward_sites, session_id, sites, stats, threshold
 
 
 @app.cell(hide_code=True)
@@ -137,9 +123,22 @@ def summary(per_patch, session_id, stats):
 
 
 @app.cell(hide_code=True)
-def plots(figures):
+def plots(position, reward_sites, threshold):
+    # Runs after the stats are on screen; says what it is doing until the figures replace it.
+    mo.output.replace(mo.md("*Loading the plotting library (matplotlib)…*"))
+    import matplotlib.pyplot  # noqa: F401 - ~3 s in the browser
+    import vr_plots as vp
+
+    mo.output.replace(mo.md("*Drawing plots…*"))
+    colors = vp.patch_colors(reward_sites["patch_label"])
+    figures = {
+        "raster": vp.plot_outcome_raster(reward_sites),
+        "velocity": vp.plot_aligned_velocity(reward_sites, position, colors, threshold),
+        "stop_rate": vp.plot_stop_rate(reward_sites, colors),
+        "leave": vp.plot_leave_heatmap(reward_sites),
+    }
     mo.vstack(list(figures.values()))
-    return
+    return colors, figures, vp
 
 
 @app.cell

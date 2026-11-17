@@ -1,7 +1,7 @@
 """Figures and the PDF report for the VR-foraging daily summary.
 
-Separate from :mod:`vr_data` so the ~3 s matplotlib import can run in the browser while
-the session's data downloads.
+Separate from :mod:`vr_data` so the notebook can show the stats first and pay the ~3 s
+matplotlib import (in the browser) only afterwards.
 """
 
 import io
