@@ -30,3 +30,7 @@ extend-select = ["I", "B", "UP"]
 [tool.pytest.ini_options]
 pythonpath = ["notebooks"]
 testpaths = ["tests"]
+
+[tool.marimo.display]
+# The figures are drawn on white; a light page keeps them from sitting in boxes.
+theme = "light"

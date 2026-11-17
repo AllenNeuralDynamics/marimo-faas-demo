@@ -165,8 +165,20 @@ def plot_timeline(sites, position, licks, colors, start: float, width: float = 6
     return fig
 
 
-def pdf_report(session_id: str, stats: dict, table: pd.DataFrame, figures: list) -> bytes:
-    """A multi-page PDF: a summary page, then one page per figure."""
+def session_figures(session) -> dict:
+    """Every static figure for a :class:`vr_data.Session`, keyed by name (page and PDF order)."""
+    rs = session.reward_sites
+    colors = patch_colors(rs["patch_label"])
+    return {
+        "raster": plot_outcome_raster(rs),
+        "velocity": plot_aligned_velocity(rs, session.position, colors, session.threshold),
+        "stop_rate": plot_stop_rate(rs, colors),
+        "leave": plot_leave_heatmap(rs),
+    }
+
+
+def pdf_report(session_id: str, stats: dict, table: pd.DataFrame, figures: list, footer: str = "") -> bytes:
+    """A multi-page PDF: a summary page, then one page per figure; ``footer`` on every page."""
     from matplotlib.backends.backend_pdf import PdfPages  # lazy: ~1 s to import in the browser
 
     cover = plt.figure(figsize=(11, 8.5))
@@ -180,13 +192,16 @@ def pdf_report(session_id: str, stats: dict, table: pd.DataFrame, figures: list)
         f"Duration: {stats['duration_min']:.0f} min",
     ]
     cover.text(0.05, 0.86, "\n".join(lines), fontsize=11, va="top", linespacing=1.8)
-    ax = cover.add_axes([0.05, 0.08, 0.9, 0.4])
+    ax = cover.add_axes([0.05, 0.1, 0.9, 0.4])
     ax.axis("off")
     ax.table(cellText=table.astype(str).to_numpy(), colLabels=list(table.columns), loc="upper left").scale(1, 1.6)
 
     buffer = io.BytesIO()
     with PdfPages(buffer) as pdf:
         for fig in [cover, *figures]:
-            pdf.savefig(fig)
+            # Footer added only for the PDF page, so the figures shown on screen stay unchanged.
+            note = fig.text(0.99, 1.0, footer, fontsize=7, color=MUTED, ha="right", va="bottom")  # top right is free
+            pdf.savefig(fig, bbox_inches="tight")
+            note.remove()
     plt.close(cover)
     return buffer.getvalue()

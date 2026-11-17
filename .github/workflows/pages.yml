@@ -38,6 +38,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - name: Stamp the repo and commit shown on the page and in the PDF
+        run: uv run python scripts/stamp_provenance.py "$GITHUB_REPOSITORY" "$GITHUB_SHA"
       - name: Export notebook to WebAssembly
         run: uv run marimo export html-wasm notebooks/daily_summary.py --mode run --no-sandbox -o _site
       # After the export, which rewrites _site: a progress overlay that paints before Python starts.

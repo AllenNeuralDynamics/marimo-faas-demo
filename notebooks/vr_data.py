@@ -13,6 +13,7 @@ import json
 import sys
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -237,3 +238,37 @@ def align_to_events(timestamps, values, events, window: tuple[float, float], ste
     query = np.asarray(events, dtype=float)[:, None] + grid[None, :]
     matrix = np.interp(query.ravel(), timestamps, values, left=np.nan, right=np.nan).reshape(query.shape)
     return grid, matrix
+
+
+@dataclass(frozen=True)
+class Session:
+    """Everything the summary shows for one session, loaded and prepared once."""
+
+    session_id: str
+    subject_id: str
+    start_time: pd.Timestamp
+    sites: pd.DataFrame
+    position: pd.DataFrame
+    licks: pd.DataFrame
+    threshold: float | None
+    reward_sites: pd.DataFrame
+    stats: dict
+    per_patch: pd.DataFrame
+
+
+async def open_session(row) -> Session:
+    """Load and prepare the session described by one row of :func:`sessions_on_day`."""
+    sites, position, licks, threshold = await load_session(row["processed_location"])
+    reward_sites = prepare_reward_sites(sites)
+    return Session(
+        session_id=row["session_id"],
+        subject_id=row["subject_id"],
+        start_time=row["start_time"],
+        sites=sites,
+        position=position,
+        licks=licks,
+        threshold=threshold,
+        reward_sites=reward_sites,
+        stats=session_summary(reward_sites, position),
+        per_patch=per_patch_table(reward_sites),
+    )

@@ -148,3 +148,12 @@ def test_leave_probability_masks_sparse_bins():
     rs = prepare_reward_sites(sites)
     assert leave_probability(rs, min_visits=5).loc[0, 0] == pytest.approx(0.5)  # 10 first-site visits, half skipped
     assert leave_probability(rs, min_visits=11).isna().all().all()
+
+
+def test_provenance_uses_stamped_repo_and_sha(monkeypatch):
+    import provenance
+
+    monkeypatch.setattr(provenance, "REPO", "Org/repo")
+    monkeypatch.setattr(provenance, "SHA", "0123456789abcdef")
+    assert provenance.label() == "Generated from Org/repo @ 0123456"
+    assert provenance.commit_url() == "https://github.com/Org/repo/commit/0123456789abcdef"
