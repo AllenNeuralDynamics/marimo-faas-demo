@@ -2,13 +2,13 @@
 
 A rewrite of the lab's "summary of today's training" notebook
 ([`SummaryTodayTraining.ipynb`](https://github.com/AllenNeuralDynamics/Aind.Behavior.VrForaging.Analysis/blob/main/notebooks/BehaviorAnalysis/General/SummaryTodayTraining.ipynb))
-as a single marimo notebook, [`notebooks/daily_summary.py`](notebooks/daily_summary.py), that reads the
+as a small marimo notebook that reads the
 [packaged](https://github.com/AllenNeuralDynamics/Aind.Behavior.VrForaging.Packaging) per-session tables
 straight from public S3.
 
-It shows the same outputs as the original: headline stats, water per patch type, the patch × site choice
-raster, velocity aligned to odor onset, P(stop) over the session, the P(leave) heatmap and a scrollable
-session timeline.
+It shows headline stats, water per patch type, the patch × site choice raster, velocity aligned to odor
+onset and P(stop) over the session. An **Export as PDF** button at the top downloads all of it as a
+4-page report, built in Python on click.
 
 ## Three ways to run it
 
@@ -33,12 +33,12 @@ uv run python -m http.server --directory _site   # WASM needs http://, not file:
 ?session=<session_id>                     (or subject + day pickers; or nothing = newest session)
    │
    ├─ DocDB  https://api.allenneuraldynamics.org/v2/metadata_index/data_assets
-   │    raw records:     {name | subject.subject_id + acquisition_start_time,
-   │                      data_level: "raw", acquisition_type: "AindVrForaging"}
-   │    derived records: {data_level: "derived", source_data: {$in: [<raw names>]}}
-   │    → newest derived record per raw session (by creation_time); its `location`
+   │    1. the session:  {name, data_level: "raw"}            → its subject and day (record fields)
+   │    2. that day:     {subject_id, acquisition_start_time in day, acquisition_type}
+   │                     → raw and derived records together; a derived record's source_data
+   │                       names its raw session; newest by creation_time wins → `location`
    │
-   └─ S3     <location>/sites.parquet, position_velocity.parquet, licks.parquet, software_events.parquet
+   └─ S3     <location>/sites.parquet, position_velocity.parquet, software_events.parquet
 ```
 
 `session_id` is the raw record's `name`, and it is treated as an opaque key. It is only compared for
@@ -47,8 +47,8 @@ own fields, and the asset path is the derived record's `location`.
 
 This is the same REST call `aind-data-access-api`'s `MetadataDbClient` makes, issued directly because the
 client's `requests` session doesn't run in Pyodide. The API and both buckets send `Access-Control-Allow-Origin: *`,
-so the browser reads them directly. A session's asset is ~13 MB, while the aggregated
-`vr-foraging-dataset/sites.parquet` is ~470 MB and isn't used.
+so the browser reads them directly. Query 2 deliberately doesn't filter on `source_data` alone: that field
+isn't indexed and takes ~6 s, against ~0.1 s for subject + day.
 
 The day picker matches `acquisition_start_time` in UTC: a session started after 4 pm Pacific is listed
 under the next day.
@@ -56,17 +56,24 @@ under the next day.
 ## Layout
 
 ```text
-notebooks/daily_summary.py   the notebook. Logic lives in top-level @app.function's (importable, testable);
-                             cells only wire UI → load → figure.
-tests/test_daily_summary.py  pytest on those functions with hand-checkable synthetic tables
+notebooks/daily_summary.py   the notebook: pick a session → load → show. ~120 lines, no logic.
+notebooks/vr_summary.py      everything else: DocDB + S3 access, analysis, figures, the PDF report
+tests/test_vr_summary.py     pytest on vr_summary with hand-checkable synthetic tables
 .github/workflows/pages.yml  ruff + marimo check + pytest on every PR; WASM export → Pages on main
 ```
 
-The logic stays in the notebook file, not a `src/` package as in `analysis-harlow-learning-sets`, on purpose.
-A WASM build can only import what Pyodide can install, and a local package would need a wheel shipped next
-to the page. Because these are `@app.function`s, `from daily_summary import classify_outcomes` still works
-for tests and other notebooks. Once the logic is shared across notebooks, move it to a package and
-`micropip.install` its wheel.
+`marimo export html-wasm` packs local modules the notebook imports (here `vr_summary.py`) into a wheel
+under `public/wheels/` and installs it in the browser, so no build step is needed. The wheel declares no
+dependencies, though: Pyodide installs only packages the notebook file imports, which is why the
+notebook's setup cell imports `matplotlib`, `numpy`, `pandas` and `pyarrow` itself.
+
+## Speed
+
+Measured cold in Chrome against a local server: the page is ready in ~24 s, and almost all of that is
+Pyodide. A blank notebook importing the same four libraries takes ~23 s. pandas (3.8 s) and matplotlib
+(2.9 s) are the biggest imports; the PDF backend (1.2 s) is imported only on click. The session itself
+(2 DocDB queries plus ~13 MB of parquet) takes ~1–2 s, which is also what switching sessions costs.
+Building the PDF takes ~3–6 s.
 
 ## What changed relative to the original notebook
 

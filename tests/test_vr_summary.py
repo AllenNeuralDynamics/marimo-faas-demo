@@ -1,33 +1,28 @@
-"""Unit tests for the pure functions of notebooks/daily_summary.py (importable because they are @app.function)."""
+"""Unit tests for notebooks/vr_summary.py."""
+
+import re
 
 import numpy as np
 import pandas as pd
 import pytest
-from daily_summary import (
+from vr_summary import (
     align_to_events,
     classify_outcomes,
-    leave_probability,
     link_processed,
     patch_colors,
+    pdf_report,
     per_patch_table,
+    plot_stop_rate,
     prepare_reward_sites,
     s3_to_https,
+    session_summary,
 )
 
 
 def make_sites(rows: list[tuple]) -> pd.DataFrame:
     """rows: (patch_index, label, has_choice, has_reward, waited, reward_available)."""
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "patch_index",
-            "patch_label",
-            "has_choice",
-            "has_reward",
-            "has_waited_reward_delay",
-            "reward_available",
-        ],
-    )
+    columns = ["patch_index", "patch_label", "has_choice", "has_reward", "has_waited_reward_delay", "reward_available"]
+    df = pd.DataFrame(rows, columns=columns)
     n = len(df)
     return df.assign(
         site_label="RewardSite",
@@ -37,11 +32,11 @@ def make_sites(rows: list[tuple]) -> pd.DataFrame:
     )
 
 
-def raw(name: str, start: str, subject: str = "s1") -> dict:
+def raw(name: str, start: str) -> dict:
     return {
         "name": name,
-        "location": f"s3://aind-open-data/{name}",
-        "subject": {"subject_id": subject},
+        "location": f"s3://bucket/{name}",
+        "subject": {"subject_id": "s1"},
         "acquisition": {"acquisition_start_time": start},
     }
 
@@ -69,9 +64,7 @@ def test_link_processed_empty():
 
 
 def test_s3_to_https():
-    assert s3_to_https("s3://aind-open-data/some asset/x") == (
-        "https://aind-open-data.s3.us-west-2.amazonaws.com/some asset/x"
-    )
+    assert s3_to_https("s3://aind-open-data/a/b") == "https://aind-open-data.s3.us-west-2.amazonaws.com/a/b"
 
 
 def test_classify_outcomes_covers_every_branch():
@@ -93,41 +86,18 @@ def test_classify_outcomes_covers_every_branch():
     ]
 
 
-def test_history_counts_reset_per_patch_and_after_reward():
-    # patch 0: R F F R F L | patch 1: F L
-    sites = make_sites(
-        [
-            (0, "a", True, True, True, 5.0),
-            (0, "a", True, False, True, 0.0),
-            (0, "a", True, False, True, 0.0),
-            (0, "a", True, True, True, 5.0),
-            (0, "a", True, False, True, 0.0),
-            (0, "a", False, None, None, None),
-            (1, "b", True, False, True, 0.0),
-            (1, "b", False, None, None, None),
-        ]
-    )
-    rs = prepare_reward_sites(sites)
-    assert rs["rewards_before"].tolist() == [0, 1, 1, 1, 2, 2, 0, 0]
-    assert rs["failures_before"].tolist() == [0, 0, 1, 2, 0, 1, 0, 1]
-
-
-def test_leave_probability_masks_sparse_bins():
-    sites = make_sites([(i, "a", i % 2 == 0, False, True, 0.0) for i in range(10)])
-    table = leave_probability(prepare_reward_sites(sites), min_visits=5)
-    assert table.loc[0, 0] == pytest.approx(0.5)  # 10 first-site visits, half skipped
-    table_strict = leave_probability(prepare_reward_sites(sites), min_visits=11)
-    assert table_strict.isna().all().all()
-
-
-def test_per_patch_table_counts_only_delivered_water():
+def test_summary_and_per_patch_count_only_delivered_water():
     sites = make_sites(
         [(0, "a", True, True, True, 5.0), (0, "a", True, False, True, 0.0), (1, "b", False, None, None, None)]
     )
-    table = per_patch_table(prepare_reward_sites(sites)).set_index("patch_label")
+    rs = prepare_reward_sites(sites)
+    position = pd.DataFrame({"timestamp": [0.0, 120.0], "position": [0.0, 500.0]})
+    stats = session_summary(rs, position)
+    assert (stats["stops"], stats["rewards"], stats["water_ul"]) == (2, 1, 5.0)
+    assert (stats["distance_m"], stats["duration_min"]) == (5.0, 2.0)
+    table = per_patch_table(rs).set_index("patch_label")
     assert table.loc["a", "water_ul"] == 5.0
     assert table.loc["b", "water_ul"] == 0.0
-    assert table.loc["a", "stop_rate"] == 1.0
 
 
 def test_align_to_events_interpolates_and_pads_with_nan():
@@ -142,4 +112,14 @@ def test_align_to_events_interpolates_and_pads_with_nan():
 def test_patch_colors_are_stable_and_never_cycle():
     assert patch_colors(["b", "a", "b"]) == patch_colors(["a", "b"])
     with pytest.raises(ValueError, match="palette slots"):
-        patch_colors([str(i) for i in range(9)])
+        patch_colors([str(i) for i in range(8)])
+
+
+def test_pdf_report_has_cover_plus_one_page_per_figure():
+    sites = make_sites([(0, "a", True, True, True, 5.0), (1, "b", False, None, None, None)])
+    rs = prepare_reward_sites(sites)
+    stats = session_summary(rs, pd.DataFrame({"timestamp": [0.0, 60.0], "position": [0.0, 100.0]}))
+    figure = plot_stop_rate(rs, patch_colors(rs["patch_label"]))
+    pdf = pdf_report("opaque-A", stats, per_patch_table(rs), [figure, figure])
+    assert pdf.startswith(b"%PDF")
+    assert len(re.findall(rb"/Type\s*/Page(?!s)", pdf)) == 3  # cover + 2 figures
