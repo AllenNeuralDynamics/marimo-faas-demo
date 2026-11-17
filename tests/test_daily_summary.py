@@ -1,20 +1,17 @@
 """Unit tests for the pure functions of notebooks/daily_summary.py (importable because they are @app.function)."""
 
-import datetime as dt
-
 import numpy as np
 import pandas as pd
 import pytest
 from daily_summary import (
-    OPEN_DATA,
     align_to_events,
     classify_outcomes,
     leave_probability,
-    parse_listing,
-    parse_session_id,
+    link_processed,
     patch_colors,
     per_patch_table,
     prepare_reward_sites,
+    s3_to_https,
 )
 
 
@@ -40,25 +37,41 @@ def make_sites(rows: list[tuple]) -> pd.DataFrame:
     )
 
 
-def test_parse_session_id():
-    assert parse_session_id("867425_2026-11-13_21-11-07") == ("867425", dt.date(2026, 11, 13))
-    assert parse_session_id("  867425_2026-11-13_21-11-07 ") == ("867425", dt.date(2026, 11, 13))
-    assert parse_session_id("867425_2026-11-13") is None
-    assert parse_session_id("../etc/passwd") is None
-
-
-def test_parse_listing_keeps_newest_processed_asset_and_ignores_raw():
-    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
-    <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-      <CommonPrefixes><Prefix>867425_2026-11-13_21-11-07/</Prefix></CommonPrefixes>
-      <CommonPrefixes><Prefix>867425_2026-11-13_21-11-07_processed_2026-11-14_07-47-14/</Prefix></CommonPrefixes>
-      <CommonPrefixes><Prefix>867425_2026-11-13_21-11-07_processed_2026-11-20_01-00-00/</Prefix></CommonPrefixes>
-      <CommonPrefixes><Prefix>867425_2026-11-13_09-00-00_processed_2026-11-14_07-00-00/</Prefix></CommonPrefixes>
-    </ListBucketResult>"""
-    assert parse_listing(xml) == {
-        "867425_2026-11-13_09-00-00": f"{OPEN_DATA}/867425_2026-11-13_09-00-00_processed_2026-11-14_07-00-00",
-        "867425_2026-11-13_21-11-07": f"{OPEN_DATA}/867425_2026-11-13_21-11-07_processed_2026-11-20_01-00-00",
+def raw(name: str, start: str, subject: str = "s1") -> dict:
+    return {
+        "name": name,
+        "location": f"s3://aind-open-data/{name}",
+        "subject": {"subject_id": subject},
+        "acquisition": {"acquisition_start_time": start},
     }
+
+
+def derived(location: str, created: str, sources: list[str] | None) -> dict:
+    return {"location": location, "data_description": {"creation_time": created, "source_data": sources}}
+
+
+def test_link_processed_matches_by_source_data_and_keeps_newest():
+    # Ids are deliberately not human readable: linking must never depend on their content.
+    raws = [raw("opaque-A", "2026-11-13T09:00:00Z"), raw("opaque-B", "2026-11-13T21:00:00Z")]
+    deriveds = [
+        derived("s3://bucket/old", "2026-11-14T07:00:00Z", ["opaque-A"]),
+        derived("s3://bucket/new", "2026-11-20T01:00:00Z", ["opaque-A"]),
+        derived("s3://bucket/unrelated", "2026-11-21T00:00:00Z", None),
+    ]
+    table = link_processed(raws, deriveds).set_index("session_id")
+    assert table.index.tolist() == ["opaque-B", "opaque-A"]  # newest acquisition first
+    assert table.loc["opaque-A", "processed_location"] == "s3://bucket/new"
+    assert pd.isna(table.loc["opaque-B", "processed_location"])
+
+
+def test_link_processed_empty():
+    assert link_processed([], []).empty
+
+
+def test_s3_to_https():
+    assert s3_to_https("s3://aind-open-data/some asset/x") == (
+        "https://aind-open-data.s3.us-west-2.amazonaws.com/some asset/x"
+    )
 
 
 def test_classify_outcomes_covers_every_branch():

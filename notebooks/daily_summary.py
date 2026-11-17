@@ -13,12 +13,15 @@
 Runs three ways from the same file:
 
 * locally:      ``uv run marimo run notebooks/daily_summary.py``
-* by URL:       ``.../?session=867425_2026-11-13_21-11-07``
+* by URL:       ``.../?session=<session_id>``
 * statically:   exported with ``marimo export html-wasm`` and served from GitHub Pages;
                 Python runs in the viewer's browser (Pyodide), no server.
 
-All data comes from the processed per-session assets in the public
-``aind-open-data`` bucket, fetched over plain HTTPS (anonymous, CORS-enabled).
+Sessions are looked up in the AIND metadata service (DocDB REST API). ``session_id``
+is the raw asset's ``name``: an opaque key, only ever compared for equality, never
+parsed or used to build a path. The processed asset is the derived record whose
+``data_description.source_data`` lists that name; its ``location`` is where the
+tables are read from. Everything is public, anonymous and CORS-enabled.
 """
 
 import marimo
@@ -28,13 +31,11 @@ app = marimo.App(width="medium", app_title="VR foraging - daily summary")
 
 with app.setup:
     import asyncio
-    import datetime as dt
     import io
-    import re
+    import json
     import sys
     import urllib.parse
     import urllib.request
-    import xml.etree.ElementTree as ET
 
     import marimo as mo
     import matplotlib.pyplot as plt
@@ -43,9 +44,17 @@ with app.setup:
     import pyarrow.parquet as pq
     from matplotlib.patches import Patch
 
-    OPEN_DATA = "https://aind-open-data.s3.us-west-2.amazonaws.com"
-    DEFAULT_SESSION = "867425_2026-11-13_21-11-07"
-    SESSION_RE = re.compile(r"^(?P<subject>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})$")
+    DOCDB = "https://api.allenneuraldynamics.org/v2/metadata_index/data_assets"
+    ACQUISITION_TYPE = "AindVrForaging"
+    S3_REGION = "us-west-2"
+    RECORD_FIELDS = {
+        "name": 1,
+        "location": 1,
+        "subject.subject_id": 1,
+        "acquisition.acquisition_start_time": 1,
+        "data_description.creation_time": 1,
+        "data_description.source_data": 1,
+    }
 
     # Reference categorical palette (light mode), fixed order, never cycled.
     CATEGORICAL = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
@@ -101,44 +110,70 @@ async def fetch_bytes(url: str) -> bytes:
 
 
 @app.function
-def parse_session_id(session_id: str) -> tuple[str, dt.date] | None:
-    """Split ``<subject>_<YYYY-MM-DD>_<HH-MM-SS>`` into (subject, date); None if malformed."""
-    match = SESSION_RE.match(session_id.strip())
-    if match is None:
-        return None
-    return match["subject"], dt.date.fromisoformat(match["date"])
+async def query_docdb(filter_query: dict, sort: dict | None = None, limit: int = 100) -> list[dict]:
+    """Records of the public AIND metadata DB (same REST call as aind-data-access-api's MetadataDbClient)."""
+    params = {"filter": json.dumps(filter_query), "projection": json.dumps(RECORD_FIELDS), "limit": limit, "skip": 0}
+    if sort:
+        params["sort"] = json.dumps(sort)
+    return json.loads(await fetch_bytes(f"{DOCDB}?{urllib.parse.urlencode(params)}"))
 
 
 @app.function
-def parse_listing(xml_bytes: bytes) -> dict[str, str]:
-    """Map session_id -> URL of its newest processed asset, from an S3 ListObjectsV2 reply.
+def s3_to_https(uri: str) -> str:
+    """``s3://bucket/key`` -> anonymous HTTPS URL for the same object (a URL rewrite; ids stay opaque)."""
+    bucket, _, key = uri.removeprefix("s3://").partition("/")
+    return f"https://{bucket}.s3.{S3_REGION}.amazonaws.com/{key}"
 
-    Processed assets are named ``<session_id>_processed_<YYYY-MM-DD_HH-MM-SS>/``;
-    the timestamp sorts lexically, so the max is the newest processing run.
+
+@app.function
+def link_processed(raw_records: list[dict], derived_records: list[dict]) -> pd.DataFrame:
+    """One row per raw session, with the location of its newest derived asset (None if not processed yet).
+
+    Raw and derived are linked by exact key: a derived record lists the raw ``name`` in
+    ``data_description.source_data``. Newest = latest ``data_description.creation_time``.
     """
-    ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
-    prefixes = [p.text.rstrip("/") for p in ET.fromstring(xml_bytes).iterfind("s3:CommonPrefixes/s3:Prefix", ns)]
-    newest: dict[str, str] = {}
-    for prefix in sorted(prefixes):
-        session_id, sep, _ = prefix.partition("_processed_")
-        if sep and SESSION_RE.match(session_id):
-            newest[session_id] = f"{OPEN_DATA}/{prefix}"  # sorted -> last write wins = newest
-    return newest
+    newest: dict[str, tuple[str, str]] = {}
+    for record in derived_records:
+        created = record["data_description"]["creation_time"]
+        for source in record["data_description"].get("source_data") or []:
+            if source not in newest or created > newest[source][0]:
+                newest[source] = (created, record["location"])
+    rows = [
+        {
+            "session_id": r["name"],
+            "subject_id": r["subject"]["subject_id"],
+            "start_time": pd.Timestamp(r["acquisition"]["acquisition_start_time"]),
+            "raw_location": r["location"],
+            "processed_location": newest[r["name"]][1] if r["name"] in newest else None,
+        }
+        for r in raw_records
+    ]
+    columns = ["session_id", "subject_id", "start_time", "raw_location", "processed_location"]
+    return pd.DataFrame(rows, columns=columns).sort_values("start_time", ascending=False, ignore_index=True)
 
 
 @app.function
-async def list_processed_sessions(subject: str, day: dt.date) -> dict[str, str]:
-    """All processed sessions of ``subject`` acquired on ``day`` (session_id -> asset URL)."""
-    query = urllib.parse.urlencode(
-        {"list-type": 2, "prefix": f"{subject.strip()}_{day.isoformat()}_", "delimiter": "/"}
+async def find_sessions(filter_query: dict, limit: int = 50) -> pd.DataFrame:
+    """VR-foraging raw sessions matching ``filter_query``, newest first, linked to their processed asset."""
+    raw = await query_docdb(
+        {**filter_query, "data_description.data_level": "raw", "acquisition.acquisition_type": ACQUISITION_TYPE},
+        sort={"acquisition.acquisition_start_time": -1},
+        limit=limit,
     )
-    return parse_listing(await fetch_bytes(f"{OPEN_DATA}/?{query}"))
+    names = [r["name"] for r in raw]
+    derived = (
+        await query_docdb({"data_description.data_level": "derived", "data_description.source_data": {"$in": names}})
+        if names
+        else []
+    )
+    return link_processed(raw, derived)
 
 
 @app.function
-async def load_table(asset_url: str, table: str, columns: list[str] | None = None) -> pd.DataFrame:
+async def load_table(asset_location: str, table: str, columns: list[str] | None = None) -> pd.DataFrame:
     """Read ``<asset>/<table>.parquet``; packaging provenance lands in ``df.attrs``."""
-    arrow = pq.read_table(io.BytesIO(await fetch_bytes(f"{asset_url}/{table}.parquet")), columns=columns)
+    payload = await fetch_bytes(f"{s3_to_https(asset_location)}/{table}.parquet")
+    arrow = pq.read_table(io.BytesIO(payload), columns=columns)
     df = arrow.to_pandas(ignore_metadata=True)  # keep e.g. `timestamp` a column, not the index
     meta = arrow.schema.metadata or {}
     df.attrs = {
@@ -434,49 +469,78 @@ def header():
     # VR foraging: daily session summary
 
     Pick a subject and a day, or open this page with `?session=<session_id>`.
-    Everything is read from the session's processed asset in the public
-    `aind-open-data` bucket, in your browser.
+    Sessions are found through the AIND metadata service; the tables are read from
+    the session's processed asset on public S3, in your browser.
     """)
     return
 
 
 @app.cell
 def requested_session():
-    # Source of truth for "which session": URL (?session=), then CLI (--session), then a default.
+    # Which session: URL (?session=), then CLI (--session), else the newest one in DocDB.
     query = mo.query_params()
-    requested = query.get("session") or mo.cli_args().get("session") or DEFAULT_SESSION
-    parsed = parse_session_id(requested)
-    mo.stop(
-        parsed is None,
-        mo.callout(mo.md(f"`{requested}` is not a session id (`<subject>_<YYYY-MM-DD>_<HH-MM-SS>`)."), kind="danger"),
-    )
-    return parsed, query, requested
+    requested = query.get("session") or mo.cli_args().get("session")
+    return query, requested
 
 
 @app.cell
-def pickers(parsed):
-    subject_input = mo.ui.text(value=parsed[0], label="Subject")
-    day_input = mo.ui.date(value=parsed[1], label="Day")
+async def focus_session(requested):
+    with mo.status.spinner(title="Looking up session"):
+        focus = await find_sessions({"name": requested} if requested else {}, limit=1)
+    mo.stop(
+        focus.empty,
+        mo.callout(mo.md(f"No VR-foraging session named `{requested}` in the metadata service."), kind="danger"),
+    )
+    return (focus,)
+
+
+@app.cell
+def pickers(focus):
+    # Defaults come from the record's own fields, not from the session name.
+    subject_input = mo.ui.text(value=focus["subject_id"].iloc[0], label="Subject")
+    day_input = mo.ui.date(value=focus["start_time"].iloc[0].date(), label="Day (UTC)")
     mo.hstack([subject_input, day_input], justify="start")
     return day_input, subject_input
 
 
 @app.cell
-async def find_sessions(day_input, subject_input):
-    with mo.status.spinner(title=f"Listing sessions of {subject_input.value} on {day_input.value}"):
-        available = await list_processed_sessions(subject_input.value, day_input.value)
+async def sessions_that_day(day_input, subject_input):
+    day = pd.Timestamp(day_input.value)
+    with mo.status.spinner(title=f"Finding sessions of {subject_input.value} on {day_input.value}"):
+        sessions = await find_sessions(
+            {
+                "subject.subject_id": subject_input.value.strip(),
+                "acquisition.acquisition_start_time": {
+                    "$gte": day.isoformat(),
+                    "$lt": (day + pd.Timedelta(days=1)).isoformat(),
+                },
+            }
+        )
     mo.stop(
-        not available,
-        mo.callout(f"No processed sessions for subject {subject_input.value} on {day_input.value}.", kind="warn"),
+        sessions.empty,
+        mo.callout(
+            f"No VR-foraging sessions for subject {subject_input.value} on {day_input.value} (UTC).", kind="warn"
+        ),
     )
-    return (available,)
+    return (sessions,)
 
 
 @app.cell
-def session_choice(available, query, requested):
+def session_choice(query, requested, sessions):
+    labels = {
+        f"{row.start_time:%H:%M} UTC · {row.session_id}{'' if pd.notna(row.processed_location) else ' (not processed yet)'}": (
+            row.session_id
+        )
+        for row in sessions.itertuples()
+    }
+    by_id = {sid: label for label, sid in labels.items()}
+    processed = sessions.loc[sessions["processed_location"].notna(), "session_id"]
+    default = (
+        requested if requested in by_id else (processed.iloc[0] if len(processed) else sessions["session_id"].iloc[0])
+    )
     session_picker = mo.ui.dropdown(
-        options=sorted(available),
-        value=requested if requested in available else max(available),
+        options=labels,
+        value=by_id[default],
         label="Session",
         on_change=lambda sid: query.set("session", sid),  # keeps the URL shareable
     )
@@ -485,9 +549,16 @@ def session_choice(available, query, requested):
 
 
 @app.cell
-async def load_session(available, session_picker):
+async def load_session(session_picker, sessions):
     session_id = session_picker.value
-    asset = available[session_id]
+    record = sessions.loc[sessions["session_id"] == session_id].iloc[0]
+    asset = record["processed_location"]
+    mo.stop(
+        pd.isna(asset),
+        mo.callout(
+            mo.md(f"`{session_id}` has no processed asset yet (raw data: `{record['raw_location']}`)."), kind="warn"
+        ),
+    )
     with mo.status.spinner(title=f"Loading {session_id}"):
         sites, position, licks, software_events = await asyncio.gather(
             load_table(asset, "sites"),
@@ -499,7 +570,7 @@ async def load_session(available, session_picker):
     colors = patch_colors(reward_sites["patch_label"])
     threshold = stop_velocity_threshold(software_events)
     mo.md(
-        f"Asset: [`{asset.rsplit('/', 1)[-1]}`]({asset}/sites.parquet) · "
+        f"Processed asset: [`{asset}`]({s3_to_https(asset)}/sites.parquet) · "
         f"packaging `{sites.attrs.get('packaging_version', '?')}` · "
         f"data contract `{sites.attrs.get('data_contract_version', '?')}`"
     )

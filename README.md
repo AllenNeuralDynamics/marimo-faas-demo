@@ -15,8 +15,8 @@ session timeline.
 | | Command / URL | Python runs |
 | --- | --- | --- |
 | 1. Local app in the browser | `uv run marimo run notebooks/daily_summary.py` (or `edit`) | on your machine |
-| 2. A session from the URL | append `?session=867425_2026-11-13_21-11-07` to either URL | either |
-| 3. Static site on GitHub Pages | `https://<owner>.github.io/<repo>/?session=<session_id>` | in the visitor's browser (Pyodide/WASM) |
+| 2. A session from the URL | append `?session=<session_id>` to either URL | either |
+| 3. Static site on GitHub Pages | [`allenneuraldynamics.github.io/marimo-faas-demo/?session=<session_id>`](https://allenneuraldynamics.github.io/marimo-faas-demo/) | in the visitor's browser (Pyodide/WASM) |
 
 Also `uv run python notebooks/daily_summary.py --session <id>` runs it headless as a script.
 
@@ -27,25 +27,31 @@ uv run marimo export html-wasm notebooks/daily_summary.py --mode run --no-sandbo
 uv run python -m http.server --directory _site   # WASM needs http://, not file://
 ```
 
-## How the data is found (no server, no index, no credentials)
+## How the data is found (no server, no credentials)
 
 ```text
-?session=<subject>_<YYYY-MM-DD>_<HH-MM-SS>
+?session=<session_id>                     (or subject + day pickers; or nothing = newest session)
    │
-   ├─ GET https://aind-open-data.s3.us-west-2.amazonaws.com/?list-type=2&prefix=<subject>_<date>_&delimiter=/
-   │     → every session of that subject that day; keep the newest "<session_id>_processed_<ts>/" per session
+   ├─ DocDB  https://api.allenneuraldynamics.org/v2/metadata_index/data_assets
+   │    raw records:     {name | subject.subject_id + acquisition_start_time,
+   │                      data_level: "raw", acquisition_type: "AindVrForaging"}
+   │    derived records: {data_level: "derived", source_data: {$in: [<raw names>]}}
+   │    → newest derived record per raw session (by creation_time); its `location`
    │
-   └─ GET <asset>/sites.parquet, position_velocity.parquet, licks.parquet, software_events.parquet
+   └─ S3     <location>/sites.parquet, position_velocity.parquet, licks.parquet, software_events.parquet
 ```
 
-Both buckets allow anonymous, CORS-enabled `GET`s, so the browser can read them directly. The aggregated
-`vr-foraging-dataset/sites.parquet` is ~470 MB and is not used: a session's own asset is ~13 MB in total.
-Newly processed sessions show up immediately, since nothing has to be rebuilt.
+`session_id` is the raw record's `name`, and it is treated as an opaque key. It is only compared for
+equality in DocDB queries, never parsed or used to build a path. Subject and date come from the record's
+own fields, and the asset path is the derived record's `location`.
 
-> The packaging docs say to look up `source_s3_location` in `session.parquet` rather than build the path.
-> This notebook lists the bucket instead, because `session.parquet` is 32 MB of mostly config JSON, too much
-> for a browser tab. If processed assets ever move out of `aind-open-data`, `list_processed_sessions` is the
-> one function to change.
+This is the same REST call `aind-data-access-api`'s `MetadataDbClient` makes, issued directly because the
+client's `requests` session doesn't run in Pyodide. The API and both buckets send `Access-Control-Allow-Origin: *`,
+so the browser reads them directly. A session's asset is ~13 MB, while the aggregated
+`vr-foraging-dataset/sites.parquet` is ~470 MB and isn't used.
+
+The day picker matches `acquisition_start_time` in UTC: a session started after 4 pm Pacific is listed
+under the next day.
 
 ## Layout
 
