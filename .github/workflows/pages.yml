@@ -1,0 +1,60 @@
+name: Build & deploy notebook
+
+# Lint + test on every PR; on main, export the notebook to WebAssembly and publish
+# it to GitHub Pages. The deployed page is fully static: Python runs in the
+# visitor's browser (Pyodide) and reads the public S3 data directly.
+#   https://<owner>.github.io/<repo>/?session=<session_id>
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run marimo check --strict notebooks/daily_summary.py
+      - run: uv run pytest -q
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Export notebook to WebAssembly
+        run: uv run marimo export html-wasm notebooks/daily_summary.py --mode run --no-sandbox -o _site
+      - run: touch _site/.nojekyll # serve the assets/ folder as-is
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
