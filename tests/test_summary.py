@@ -1,22 +1,21 @@
-"""Unit tests for notebooks/vr_summary.py."""
+"""Unit tests for notebooks/vr_data.py and notebooks/vr_plots.py."""
 
 import re
 
 import numpy as np
 import pandas as pd
 import pytest
-from vr_summary import (
+from vr_data import (
     align_to_events,
     classify_outcomes,
+    leave_probability,
     link_processed,
-    patch_colors,
-    pdf_report,
     per_patch_table,
-    plot_stop_rate,
     prepare_reward_sites,
     s3_to_https,
     session_summary,
 )
+from vr_plots import patch_colors, pdf_report, plot_stop_rate
 
 
 def make_sites(rows: list[tuple]) -> pd.DataFrame:
@@ -123,3 +122,29 @@ def test_pdf_report_has_cover_plus_one_page_per_figure():
     pdf = pdf_report("opaque-A", stats, per_patch_table(rs), [figure, figure])
     assert pdf.startswith(b"%PDF")
     assert len(re.findall(rb"/Type\s*/Page(?!s)", pdf)) == 3  # cover + 2 figures
+
+
+def test_history_counts_reset_per_patch_and_after_reward():
+    # patch 0: R F F R F L | patch 1: F L
+    sites = make_sites(
+        [
+            (0, "a", True, True, True, 5.0),
+            (0, "a", True, False, True, 0.0),
+            (0, "a", True, False, True, 0.0),
+            (0, "a", True, True, True, 5.0),
+            (0, "a", True, False, True, 0.0),
+            (0, "a", False, None, None, None),
+            (1, "b", True, False, True, 0.0),
+            (1, "b", False, None, None, None),
+        ]
+    )
+    rs = prepare_reward_sites(sites)
+    assert rs["rewards_before"].tolist() == [0, 1, 1, 1, 2, 2, 0, 0]
+    assert rs["failures_before"].tolist() == [0, 0, 1, 2, 0, 1, 0, 1]
+
+
+def test_leave_probability_masks_sparse_bins():
+    sites = make_sites([(i, "a", i % 2 == 0, False, True, 0.0) for i in range(10)])
+    rs = prepare_reward_sites(sites)
+    assert leave_probability(rs, min_visits=5).loc[0, 0] == pytest.approx(0.5)  # 10 first-site visits, half skipped
+    assert leave_probability(rs, min_visits=11).isna().all().all()

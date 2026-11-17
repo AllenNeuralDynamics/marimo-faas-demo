@@ -1,0 +1,96 @@
+<!--
+  Loading overlay for the static (WASM) build; injected after <body> by scripts/inject_boot_overlay.py.
+  It paints before Python exists. "python" and "packages" are inferred from marimo's own loading
+  text; later steps arrive from notebooks/boot.py over a BroadcastChannel. It can never hide the page
+  for good: after 45 s without progress it offers to show the page as it is.
+-->
+<div id="vrs-boot" role="status" aria-live="polite">
+  <style>
+    #vrs-boot { position: fixed; inset: 0; z-index: 2147483000; display: grid; place-items: center; padding: 16px;
+      background: #fcfcfb; color: #0b0b0b; font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+      transition: opacity 250ms ease; }
+    #vrs-boot.leaving { opacity: 0; pointer-events: none; }
+    #vrs-boot .card { width: min(440px, 100%); }
+    #vrs-boot .eyebrow { margin: 0 0 12px; font: 600 11px/1 ui-monospace, Consolas, monospace; letter-spacing: .1em;
+      text-transform: uppercase; color: #898781; }
+    #vrs-boot .label { margin: 0 0 14px; font-size: 17px; font-weight: 500; min-height: 2.6em; }
+    #vrs-boot .bar { display: flex; gap: 4px; height: 6px; }
+    #vrs-boot .seg { flex: 1; border-radius: 3px; background: #e1e0d9; position: relative; overflow: hidden; }
+    #vrs-boot .seg.done { background: #2a78d6; }
+    #vrs-boot .seg.active { background: #cde2fb; }
+    #vrs-boot .seg.active::after { content: ""; position: absolute; inset: 0; width: 40%; border-radius: 3px;
+      background: #2a78d6; animation: vrs-sweep 1.2s ease-in-out infinite; }
+    @keyframes vrs-sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+    @media (prefers-reduced-motion: reduce) { #vrs-boot .seg.active::after { animation: none; width: 100%; opacity: .5; } }
+    #vrs-boot .meta { display: flex; justify-content: space-between; margin-top: 10px; color: #52514e;
+      font: 12px/1.4 ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    #vrs-boot .note { margin: 18px 0 0; font-size: 13px; color: #52514e; }
+    #vrs-boot .note:empty { display: none; }
+    #vrs-boot button { display: none; margin-top: 12px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer;
+      color: #2a78d6; background: #fff; border: 1px solid #e1e0d9; border-radius: 6px; }
+    #vrs-boot.stuck button { display: inline-block; }
+    @media (prefers-color-scheme: dark) {
+      #vrs-boot { background: #1a1a19; color: #f0efec; }
+      #vrs-boot .seg { background: #383835; } #vrs-boot .seg.active { background: #184f95; }
+      #vrs-boot .meta, #vrs-boot .note { color: #c3c2b7; } #vrs-boot button { background: #1a1a19; border-color: #383835; }
+    }
+  </style>
+  <div class="card">
+    <p class="eyebrow">VR foraging · daily summary</p>
+    <p class="label"></p>
+    <div class="bar" role="progressbar" aria-label="Loading the notebook" aria-valuemin="0"></div>
+    <div class="meta"><span class="count"></span><span class="clock"></span></div>
+    <p class="note"></p>
+    <button type="button">Show the page</button>
+  </div>
+  <script>
+    (() => {
+      const STEPS = __BOOT_STEPS__;
+      const root = document.getElementById("vrs-boot");
+      const $ = (sel) => root.querySelector(sel);
+      const segments = STEPS.map(() => $(".bar").appendChild(document.createElement("div")));
+      $(".bar").setAttribute("aria-valuemax", String(STEPS.length));
+      const started = performance.now();
+      let current = -1, lastProgress = started, finished = false, channel = null;
+
+      function show(index) {
+        if (finished || index <= current) return; // only ever moves forward
+        current = index;
+        lastProgress = performance.now();
+        root.classList.remove("stuck");
+        $(".label").textContent = STEPS[index][1] + "…";
+        $(".count").textContent = `Step ${index + 1} of ${STEPS.length}`;
+        $(".bar").setAttribute("aria-valuenow", String(index));
+        segments.forEach((seg, i) => (seg.className = "seg" + (i < index ? " done" : i === index ? " active" : "")));
+      }
+      function finish() {
+        if (finished) return;
+        finished = true;
+        clearInterval(timer);
+        if (channel) channel.close();
+        segments.forEach((seg) => (seg.className = "seg done"));
+        root.classList.add("leaving");
+        setTimeout(() => root.remove(), 300);
+      }
+      $("button").addEventListener("click", finish);
+      try {
+        channel = new BroadcastChannel(__BOOT_CHANNEL__);
+        channel.onmessage = ({ data }) => {
+          if (data === "done") return finish();
+          const index = STEPS.findIndex(([key]) => key === data);
+          if (index >= 0) show(index);
+        };
+      } catch (err) { /* no channel: the bar still shows the first steps and the button still works */ }
+      const timer = setInterval(() => {
+        const now = performance.now();
+        $(".clock").textContent = `${((now - started) / 1000).toFixed(1)} s`;
+        if (current < 1 && document.body.innerText.includes("Loading notebook and dependencies")) show(1);
+        if (now - lastProgress > 45000 && !root.classList.contains("stuck")) {
+          root.classList.add("stuck");
+          $(".note").textContent = "This is taking longer than usual. It may still finish, or you can see the page as it is.";
+        }
+      }, 200);
+      show(0);
+    })();
+  </script>
+</div>

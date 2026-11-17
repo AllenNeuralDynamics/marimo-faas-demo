@@ -7,8 +7,8 @@ as a small marimo notebook that reads the
 straight from public S3.
 
 It shows headline stats, water per patch type, the patch × site choice raster, velocity aligned to odor
-onset and P(stop) over the session. An **Export as PDF** button at the top downloads all of it as a
-4-page report, built in Python on click.
+onset, P(stop) over the session, the P(leave) heatmap and a scrollable session timeline. An **Export as
+PDF** button at the top downloads a 5-page report, built in Python on click.
 
 ## Three ways to run it
 
@@ -24,6 +24,7 @@ Build the static site locally exactly as CI does:
 
 ```bash
 uv run marimo export html-wasm notebooks/daily_summary.py --mode run --no-sandbox -o _site
+uv run python scripts/inject_boot_overlay.py _site/index.html   # loading progress overlay
 uv run python -m http.server --directory _site   # WASM needs http://, not file://
 ```
 
@@ -38,7 +39,7 @@ uv run python -m http.server --directory _site   # WASM needs http://, not file:
    │                     → raw and derived records together; a derived record's source_data
    │                       names its raw session; newest by creation_time wins → `location`
    │
-   └─ S3     <location>/sites.parquet, position_velocity.parquet, software_events.parquet
+   └─ S3     <location>/sites.parquet, position_velocity.parquet, licks.parquet, software_events.parquet
 ```
 
 `session_id` is the raw record's `name`, and it is treated as an opaque key. It is only compared for
@@ -56,24 +57,46 @@ under the next day.
 ## Layout
 
 ```text
-notebooks/daily_summary.py   the notebook: pick a session → load → show. ~120 lines, no logic.
-notebooks/vr_summary.py      everything else: DocDB + S3 access, analysis, figures, the PDF report
-tests/test_vr_summary.py     pytest on vr_summary with hand-checkable synthetic tables
-.github/workflows/pages.yml  ruff + marimo check + pytest on every PR; WASM export → Pages on main
+notebooks/daily_summary.py      the notebook: pick a session → load → show. No logic.
+notebooks/vr_data.py            DocDB + S3 access and analysis (no matplotlib)
+notebooks/vr_plots.py           figures and the PDF report
+notebooks/boot.py               progress steps reported to the loading overlay (browser only)
+scripts/boot_overlay.html       the overlay; injected into the export by scripts/inject_boot_overlay.py
+tests/test_summary.py           pytest on vr_data/vr_plots with hand-checkable synthetic tables
+.github/workflows/pages.yml     ruff + marimo check + pytest on every PR; WASM export → Pages on main
 ```
 
-`marimo export html-wasm` packs local modules the notebook imports (here `vr_summary.py`) into a wheel
-under `public/wheels/` and installs it in the browser, so no build step is needed. The wheel declares no
-dependencies, though: Pyodide installs only packages the notebook file imports, which is why the
-notebook's setup cell imports `matplotlib`, `numpy`, `pandas` and `pyarrow` itself.
+`marimo export html-wasm` packs local modules the notebook imports into wheels under `public/wheels/` and
+installs them in the browser, so they need no build step. The wheels declare no dependencies, though:
+Pyodide installs only packages the notebook file imports, which is why the notebook imports `numpy`,
+`pandas`, `pyarrow` and `matplotlib` itself.
 
-## Speed
+## Loading, speed and caching
 
-Measured cold in Chrome against a local server: the page is ready in ~24 s, and almost all of that is
-Pyodide. A blank notebook importing the same four libraries takes ~23 s. pandas (3.8 s) and matplotlib
-(2.9 s) are the biggest imports; the PDF backend (1.2 s) is imported only on click. The session itself
-(2 DocDB queries plus ~13 MB of parquet) takes ~1–2 s, which is also what switching sessions costs.
-Building the PDF takes ~3–6 s.
+In the static build, a progress overlay paints before Python exists. It shows: starting Python →
+installing packages → loading libraries → finding the session → downloading data → processing and
+plotting. The first two steps are read from marimo's own loading text; the rest are posted by
+`boot.report()` over a `BroadcastChannel`. After 45 s without progress it offers to show the page anyway.
+
+Measured in Chrome against a local server:
+
+| | cold (empty browser cache) | warm (reload) |
+| --- | --- | --- |
+| Python + packages | ~18 s | ~15 s |
+| loading libraries (pandas 3.8 s, numpy, pyarrow) | ~4.5 s | ~4.7 s |
+| session lookup (2 DocDB queries) | ~0.5 s | ~0.4 s |
+| data download, overlapped with the ~3 s matplotlib import | ~6.5 s | ~3.5 s |
+| processing + plotting | ~2 s | ~2 s |
+| **total** | **~33 s** | **~26 s** |
+
+- **Overlap:** matplotlib is imported only in the load cell, after the downloads are issued. Python under
+  Pyodide blocks the worker's event loop, but requests already sent keep downloading.
+- **Caching:** processed assets never change in place, so their parquet files are fetched with
+  `cache: "force-cache"`, and the browser reuses its HTTP-cached copy across reloads. Loaded sessions
+  are also kept in memory, so switching back to one is instant. DocDB answers are never cached.
+- **What's left:** almost all of it is Pyodide starting and loading packages, the same for a notebook that
+  does nothing. The next win would be dropping pandas (~4 s), which would mean rewriting the analysis on
+  pyarrow + numpy.
 
 ## What changed relative to the original notebook
 
