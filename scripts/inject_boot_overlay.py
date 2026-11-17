@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "notebooks"))
-from boot import CHANNEL, STEPS
+from boot import CHANNEL, DOWNLOAD_CHANNEL, STEPS
 
 TEMPLATE = Path(__file__).with_name("boot_overlay.html")
 
@@ -23,6 +23,7 @@ def inject(page: str) -> str:
         raise ValueError("expected exactly one <body> and no overlay yet")
     overlay = TEMPLATE.read_text(encoding="utf-8")
     overlay = overlay.replace("__BOOT_STEPS__", json.dumps(STEPS)).replace("__BOOT_CHANNEL__", json.dumps(CHANNEL))
+    overlay = overlay.replace("__DOWNLOAD_CHANNEL__", json.dumps(DOWNLOAD_CHANNEL))
     return page[: bodies[0].end()] + "\n" + overlay + page[bodies[0].end() :]
 
 

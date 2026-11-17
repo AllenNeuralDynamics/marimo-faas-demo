@@ -41,6 +41,7 @@ def header(session):
 @app.cell(hide_code=True)
 async def pick_subject_and_day():
     # ?session=<id> in the URL (or --session) picks the session; otherwise the newest one.
+    # Add &pdf=1 to also download the PDF (or --pdf report.pdf when run as a script).
     query = mo.query_params()
     requested = query.get("session") or mo.cli_args().get("session")
     subject, day = await ui.session_inputs(requested)
@@ -72,10 +73,10 @@ def summary(session):
 
 
 @app.cell(hide_code=True)
-def plots(session):
+def plots(query, session):
     import matplotlib  # noqa: F401 - named so the browser build installs it; ui.plots imports it
 
-    ui.plots(session)
+    ui.plots(session, query)  # with ?pdf=1 in the URL, also downloads the PDF
     return
 
 

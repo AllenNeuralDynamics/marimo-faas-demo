@@ -94,3 +94,18 @@
     })();
   </script>
 </div>
+<script>
+  // Files sent by Python (notebooks/boot.py save_file), e.g. the PDF for ?pdf=1. Stays after the overlay closes.
+  (() => {
+    try {
+      new BroadcastChannel(__DOWNLOAD_CHANNEL__).onmessage = ({ data }) => {
+        const url = URL.createObjectURL(new Blob([data.data], { type: data.type }));
+        const link = Object.assign(document.createElement("a"), { href: url, download: data.name });
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+      };
+    } catch (err) { /* no BroadcastChannel: the PDF button still works */ }
+  })();
+</script>

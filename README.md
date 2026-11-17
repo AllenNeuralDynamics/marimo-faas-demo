@@ -20,6 +20,9 @@ It runs entirely in your browser; there's nothing to install.
   https://allenneuraldynamics.github.io/marimo-faas-demo/?session=878046_2026-11-13_20-59-59
 
 - **Export as PDF:** the button at the top downloads a report with the stats and every figure.
+  To get it without clicking, add `&pdf=1` to a session link and the PDF downloads once the page has
+  loaded:
+  https://allenneuraldynamics.github.io/marimo-faas-demo/?session=878046_2026-11-13_20-59-59&pdf=1
 - **Timeline:** drag the slider to move the 60 s window through the session.
 
 The first load takes about half a minute while Python starts in your browser; a progress bar shows each
@@ -39,3 +42,9 @@ uv run marimo edit notebooks/daily_summary.py     # edit the notebook
 ```
 
 Add `?session=<session_id>` to the local URL to open a specific session.
+
+To write a session's PDF without opening a browser:
+
+```bash
+uv run python notebooks/daily_summary.py --session <session_id> --pdf report.pdf
+```

@@ -4,6 +4,8 @@ Kept out of the notebook so its cells stay one line each. Progress for the stati
 loading overlay is reported from here too (see boot.py).
 """
 
+from pathlib import Path
+
 import boot
 import marimo as mo
 import pandas as pd
@@ -75,17 +77,21 @@ async def load(picker, sessions) -> vd.Session:
 # ---------------------------------------------------------------------------
 
 
+def _pdf_bytes(session: vd.Session, figures: dict | None = None) -> bytes:
+    import vr_plots as vp
+
+    figures = figures or vp.session_figures(session)
+    return vp.pdf_report(
+        session.session_id, session.stats, session.per_patch, list(figures.values()), provenance.label()
+    )
+
+
 def _pdf_button(session: vd.Session) -> mo.Html:
-    def build() -> bytes:  # on click only: figures are redrawn for the PDF
-        import vr_plots as vp
-
-        figures = vp.session_figures(session)
-        return vp.pdf_report(
-            session.session_id, session.stats, session.per_patch, list(figures.values()), provenance.label()
-        )
-
     button = mo.download(
-        data=build, filename=f"{session.session_id}.pdf", mimetype="application/pdf", label="Export as PDF"
+        data=lambda: _pdf_bytes(session),  # built on click only
+        filename=f"{session.session_id}.pdf",
+        mimetype="application/pdf",
+        label="Export as PDF",
     )
     return button.style({"transform": "scale(1.35)", "transform-origin": "right center"})
 
@@ -139,7 +145,22 @@ def _section(title: str, how_to_read: str, body) -> mo.Html:
     return mo.vstack([mo.md(f"### {title}"), _caption(how_to_read), body], gap=0.4)
 
 
-def plots(session: vd.Session) -> mo.Html:
+def _auto_pdf(session: vd.Session, figures: dict, query) -> list:
+    """``?pdf=1`` in the URL downloads the PDF without a click; ``--pdf <path>`` writes it from a script."""
+    path = mo.cli_args().get("pdf")
+    if not path and query.get("pdf") in (None, "0", "false"):
+        return []
+    name = f"{session.session_id}.pdf"
+    pdf = _pdf_bytes(session, figures)
+    if path:
+        Path(path).write_bytes(pdf)
+        return [mo.callout(f"PDF written to {path}.", kind="success")]
+    if boot.save_file(name, pdf, "application/pdf"):
+        return [mo.callout(f"Downloaded {name} (requested with ?pdf=1 in the link).", kind="success")]
+    return [mo.callout("Automatic download works on the published site; use Export as PDF here.", kind="info")]
+
+
+def plots(session: vd.Session, query) -> mo.Html:
     """All figures, in sections. Imports matplotlib here, after the stats are on screen."""
     mo.output.replace(_caption("Loading the plotting library (matplotlib)…"))
     import vr_plots as vp
@@ -148,6 +169,7 @@ def plots(session: vd.Session) -> mo.Html:
     figures = vp.session_figures(session)
     return mo.vstack(
         [
+            *_auto_pdf(session, figures, query),
             _section(
                 "Choices, patch by patch",
                 "One column per patch, one cell per odor site, colored by what the animal did there.",
